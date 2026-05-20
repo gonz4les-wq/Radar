@@ -3,9 +3,10 @@
  *
  * Step 1: mounts the static radar canvas.
  * Step 2: kicks off the sweep animation (handled inside radar.js).
- * Step 3: opens a WebSocket to the backend and keeps the latest
- *         payload available on window.RadarState. No rendering of
- *         live data yet — that wiring lands in a later step.
+ * Step 3: opens a WebSocket and keeps the latest payload on window.RadarState.
+ * Step 4–5: radar.js consumes the 'radar:data' event.
+ * Step 6: drives the HUD (activity level, intensity bar, status chip)
+ *         and the optional FPS overlay.
  */
 
 (function () {
@@ -13,9 +14,6 @@
 
   // ---------- Configuration ----------
 
-  // Default WS URL is derived from the page location. Override by setting
-  //   window.RADAR_WS_URL = "ws://host:port/path"
-  // before this script runs, or by adding ?ws=ws://... to the page URL.
   function resolveWsUrl() {
     try {
       const params = new URLSearchParams(window.location.search);
@@ -35,32 +33,140 @@
   const RECONNECT_MIN_MS = 1000;
   const RECONNECT_MAX_MS = 15000;
 
+  const ACTIVITY_LEVELS = ["none", "low", "medium", "high"];
+
   // ---------- Shared state ----------
 
-  /**
-   * RadarState is the single source of truth for backend data.
-   * radar.js (and anything else) will read from here later.
-   */
   const RadarState = {
     connected: false,
     lastMessageAt: 0,
     lastError: null,
-
-    // Latest payload, shape matches backend contract.
     data: {
       blips: [],
       global_intensity: 0.0,
-      activity_level: "low",
+      activity_level: "none",
     },
   };
   window.RadarState = RadarState;
 
-  // ---------- HUD status indicator ----------
+  // ---------- HUD ----------
 
-  function setStatus(text) {
-    const el = document.getElementById("status-tag");
-    if (el) el.textContent = text;
-  }
+  const HUD = {
+    body: document.body,
+    activityEl: null,
+    intensityValueEl: null,
+    intensityFillEl: null,
+    intensityBarEl: null,
+    statusEl: null,
+    statusTextEl: null,
+
+    init() {
+      this.activityEl = document.getElementById("hud-activity");
+      this.intensityValueEl = document.getElementById("hud-intensity-value");
+      this.intensityFillEl = document.getElementById("hud-intensity-fill");
+      this.intensityBarEl = this.intensityFillEl
+        ? this.intensityFillEl.parentElement
+        : null;
+      this.statusEl = document.getElementById("status-tag");
+      this.statusTextEl = this.statusEl
+        ? this.statusEl.querySelector(".status-text")
+        : null;
+
+      this.setActivity("none");
+      this.setIntensity(0);
+    },
+
+    setStatus(state, text) {
+      if (!this.statusEl) return;
+      this.statusEl.classList.remove(
+        "status-live",
+        "status-connecting",
+        "status-reconnect",
+        "status-disconnected"
+      );
+      this.statusEl.classList.add(`status-${state}`);
+      if (this.statusTextEl) this.statusTextEl.textContent = text;
+    },
+
+    setActivity(level) {
+      const norm = ACTIVITY_LEVELS.includes(level) ? level : "none";
+      this.body.setAttribute("data-activity", norm);
+      if (this.activityEl) this.activityEl.textContent = norm.toUpperCase();
+    },
+
+    setIntensity(value) {
+      const v = clamp01(value);
+      if (this.intensityFillEl) {
+        this.intensityFillEl.style.width = `${(v * 100).toFixed(1)}%`;
+      }
+      if (this.intensityValueEl) {
+        this.intensityValueEl.textContent = v.toFixed(2);
+      }
+      if (this.intensityBarEl) {
+        this.intensityBarEl.setAttribute("aria-valuenow", v.toFixed(2));
+      }
+    },
+  };
+
+  // ---------- FPS overlay ----------
+
+  const FPS = {
+    visible: false,
+    rafId: 0,
+    lastTs: 0,
+    frames: 0,
+    accum: 0,
+    valueEl: null,
+    readoutEl: null,
+    toggleEl: null,
+
+    init() {
+      this.valueEl = document.getElementById("fps-value");
+      this.readoutEl = document.getElementById("fps-readout");
+      this.toggleEl = document.getElementById("fps-toggle");
+      if (this.toggleEl) {
+        this.toggleEl.addEventListener("click", () => this.toggle());
+      }
+    },
+
+    toggle() {
+      this.visible = !this.visible;
+      if (this.toggleEl) {
+        this.toggleEl.setAttribute("aria-pressed", String(this.visible));
+      }
+      if (this.readoutEl) this.readoutEl.hidden = !this.visible;
+      if (this.visible) this._start();
+      else this._stop();
+    },
+
+    _start() {
+      if (this.rafId) return;
+      this.lastTs = 0;
+      this.frames = 0;
+      this.accum = 0;
+      const loop = (ts) => {
+        if (!this.lastTs) this.lastTs = ts;
+        const dt = ts - this.lastTs;
+        this.lastTs = ts;
+        this.frames++;
+        this.accum += dt;
+        if (this.accum >= 500) {
+          const fps = (this.frames * 1000) / this.accum;
+          if (this.valueEl) this.valueEl.textContent = fps.toFixed(0);
+          this.frames = 0;
+          this.accum = 0;
+        }
+        this.rafId = requestAnimationFrame(loop);
+      };
+      this.rafId = requestAnimationFrame(loop);
+    },
+
+    _stop() {
+      if (this.rafId) cancelAnimationFrame(this.rafId);
+      this.rafId = 0;
+      if (this.valueEl) this.valueEl.textContent = "--";
+    },
+  };
 
   // ---------- WebSocket client ----------
 
@@ -83,17 +189,18 @@
         sock = new WebSocket(this.url);
       } catch (err) {
         RadarState.lastError = String(err);
+        HUD.setStatus("reconnect", "RECONNECT");
         this._scheduleReconnect();
         return;
       }
       this.socket = sock;
-      setStatus("CONNECTING");
+      HUD.setStatus("connecting", "CONNECTING");
 
       sock.addEventListener("open", () => {
         RadarState.connected = true;
         RadarState.lastError = null;
         this.reconnectDelay = RECONNECT_MIN_MS;
-        setStatus("LIVE");
+        HUD.setStatus("live", "LIVE");
       });
 
       sock.addEventListener("message", (evt) => {
@@ -104,16 +211,15 @@
         RadarState.connected = false;
         this.socket = null;
         if (!this.manualClose) {
-          setStatus("RECONNECT");
+          HUD.setStatus("reconnect", "RECONNECT");
           this._scheduleReconnect();
         } else {
-          setStatus("OFFLINE");
+          HUD.setStatus("disconnected", "OFFLINE");
         }
       });
 
-      sock.addEventListener("error", (evt) => {
+      sock.addEventListener("error", () => {
         RadarState.lastError = "socket error";
-        // The browser will fire 'close' right after — reconnect is handled there.
       });
     },
 
@@ -122,7 +228,7 @@
       try {
         payload = JSON.parse(raw);
       } catch (_) {
-        return; // ignore non-JSON frames
+        return;
       }
       if (!payload || typeof payload !== "object") return;
 
@@ -130,15 +236,15 @@
       if (Array.isArray(payload.blips)) next.blips = payload.blips;
       if (typeof payload.global_intensity === "number") {
         next.global_intensity = payload.global_intensity;
+        HUD.setIntensity(payload.global_intensity);
       }
       if (typeof payload.activity_level === "string") {
         next.activity_level = payload.activity_level;
+        HUD.setActivity(payload.activity_level.toLowerCase());
       }
 
       RadarState.lastMessageAt = Date.now();
 
-      // Dispatch a lightweight event so future consumers (radar.js, HUD)
-      // can subscribe without polling.
       window.dispatchEvent(
         new CustomEvent("radar:data", { detail: RadarState.data })
       );
@@ -171,13 +277,27 @@
   };
   window.RadarWS = WS;
 
+  // ---------- Helpers ----------
+
+  function clamp01(n) {
+    const v = typeof n === "number" ? n : Number(n);
+    if (Number.isNaN(v)) return 0;
+    if (v < 0) return 0;
+    if (v > 1) return 1;
+    return v;
+  }
+
   // ---------- Boot ----------
 
   function boot() {
+    HUD.init();
+    FPS.init();
+
     const canvas = document.getElementById("radar-canvas");
     if (canvas && window.Radar) {
       window.Radar.init(canvas);
     }
+
     WS.connect();
   }
 

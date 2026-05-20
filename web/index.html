@@ -12,33 +12,39 @@
   <title>WiFi Activity Radar</title>
   <link rel="stylesheet" href="style.css" />
 </head>
-<body>
+<body data-activity="none">
   <div id="app">
     <header id="top-bar">
       <h1 id="title">WiFi Activity Radar</h1>
-      <div id="status-tag">STANDBY</div>
+      <div id="top-right">
+        <button id="fps-toggle" type="button" aria-pressed="false" title="Toggle FPS">FPS</button>
+        <div id="status-tag" class="status-disconnected">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span class="status-text">CONNECTING</span>
+        </div>
+      </div>
     </header>
 
     <main id="radar-stage">
       <canvas id="radar-canvas"></canvas>
+      <div id="fps-readout" hidden>FPS <span id="fps-value">--</span></div>
     </main>
 
     <footer id="hud">
-      <div class="hud-cell">
-        <span class="hud-label">DEVICES</span>
-        <span class="hud-value" id="hud-devices">--</span>
+      <div class="hud-cell hud-activity">
+        <span class="hud-label">Activity Level</span>
+        <span class="hud-value" id="hud-activity">NONE</span>
       </div>
-      <div class="hud-cell">
-        <span class="hud-label">CHANNEL</span>
-        <span class="hud-value" id="hud-channel">--</span>
-      </div>
-      <div class="hud-cell">
-        <span class="hud-label">SIGNAL</span>
-        <span class="hud-value" id="hud-signal">--</span>
-      </div>
-      <div class="hud-cell">
-        <span class="hud-label">UPTIME</span>
-        <span class="hud-value" id="hud-uptime">--</span>
+
+      <div class="hud-cell hud-intensity">
+        <div class="hud-intensity-head">
+          <span class="hud-label">Global Intensity</span>
+          <span class="hud-value-small" id="hud-intensity-value">0.00</span>
+        </div>
+        <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0">
+          <div class="bar-fill" id="hud-intensity-fill"></div>
+          <div class="bar-ticks" aria-hidden="true"></div>
+        </div>
       </div>
     </footer>
   </div>
