@@ -4,6 +4,7 @@
  * Step 2: clockwise sweep with bright leading edge and fading trail.
  * Step 3: (no changes — data layer lives in app.js).
  * Step 4: incoming blips are drawn as glowing dots that fade smoothly.
+ * Step 5: blips pulse + emit a ripple when the sweep passes over them.
  */
 
 (function () {
@@ -32,6 +33,12 @@
   const BLIP_MAX_RADIUS = 9.5;     // px at intensity 1
   const BLIP_MAX_ACTIVE = 256;     // hard cap to keep mobile happy
 
+  // Sweep-pass interaction
+  const PULSE_DURATION_MS = 650;   // brightness / size pulse after a sweep hit
+  const RIPPLE_DURATION_MS = 800;  // expanding ring lifetime
+  const RIPPLE_EXPAND_PX = 38;     // how far the ring grows
+  const RIPPLE_MAX_ACTIVE = 64;    // hard cap on concurrent ripples
+
   // ---------- Radar singleton ----------
 
   const Radar = {
@@ -47,7 +54,9 @@
     _rafId: 0,
     _startTs: 0,
     _angle: -Math.PI / 2,
-    _blips: [], // { x, y, intensity, bornAt }
+    _prevAngle: -Math.PI / 2,
+    _blips: [],   // { x, y, intensity, bornAt, lastPingAt }
+    _ripples: [], // { x, y, intensity, bornAt }
 
     init(canvas) {
       this.canvas = canvas;
@@ -96,7 +105,7 @@
         const y = clamp01(b.y);
         const intensity = clamp01(b.intensity);
         if (Number.isNaN(x) || Number.isNaN(y)) continue;
-        this._blips.push({ x, y, intensity, bornAt: now });
+        this._blips.push({ x, y, intensity, bornAt: now, lastPingAt: 0 });
       }
       // Cap active blips, dropping the oldest first.
       if (this._blips.length > BLIP_MAX_ACTIVE) {
@@ -110,6 +119,7 @@
         if (!this._startTs) this._startTs = ts;
         const elapsed = ts - this._startTs;
         const t = (elapsed % SWEEP_PERIOD_MS) / SWEEP_PERIOD_MS;
+        this._prevAngle = this._angle;
         this._angle = -Math.PI / 2 + t * Math.PI * 2;
         this.render(performance.now());
         this._rafId = requestAnimationFrame(loop);
@@ -137,10 +147,58 @@
       this._drawRings(ctx, cx, cy, radius);
       this._drawCrosshair(ctx, cx, cy, radius);
       this._drawTicks(ctx, cx, cy, radius);
+      this._detectSweepHits(nowMs);
       this._drawBlips(ctx, cx, cy, radius, nowMs);
+      this._drawRipples(ctx, cx, cy, radius, nowMs);
       this._drawSweep(ctx, cx, cy, radius, this._angle);
       this._drawCenter(ctx, cx, cy);
       this._drawFrame(ctx, cx, cy, radius);
+    },
+
+    /**
+     * Compare current vs previous sweep angle and detect blips whose
+     * angle from radar centre was crossed this frame. Tags the blip
+     * with lastPingAt and spawns a ripple.
+     */
+    _detectSweepHits(nowMs) {
+      if (this._blips.length === 0) return;
+
+      const TAU = Math.PI * 2;
+      let delta = this._angle - this._prevAngle;
+      // Normalize to a positive forward step. If the sweep wrapped from
+      // ~2π back to 0, delta becomes negative — add TAU to keep it forward.
+      delta = ((delta % TAU) + TAU) % TAU;
+      if (delta <= 0) return;
+
+      const cx = this.cx;
+      const cy = this.cy;
+      const radius = this.radius;
+      const prev = ((this._prevAngle % TAU) + TAU) % TAU;
+
+      for (let i = 0; i < this._blips.length; i++) {
+        const b = this._blips[i];
+        const px = cx + (b.x - 0.5) * 2 * radius;
+        const py = cy + (b.y - 0.5) * 2 * radius;
+        const dx = px - cx;
+        const dy = py - cy;
+        if (dx * dx + dy * dy > radius * radius * 1.02) continue;
+
+        const blipAngle = Math.atan2(dy, dx);
+        const rel = ((blipAngle - prev) % TAU + TAU) % TAU;
+        if (rel <= delta) {
+          // Debounce: don't re-ping a blip within a single sweep arc.
+          if (nowMs - b.lastPingAt < PULSE_DURATION_MS * 0.6) continue;
+          b.lastPingAt = nowMs;
+          this._spawnRipple(b.x, b.y, b.intensity, nowMs);
+        }
+      }
+    },
+
+    _spawnRipple(x, y, intensity, nowMs) {
+      this._ripples.push({ x, y, intensity, bornAt: nowMs });
+      if (this._ripples.length > RIPPLE_MAX_ACTIVE) {
+        this._ripples.splice(0, this._ripples.length - RIPPLE_MAX_ACTIVE);
+      }
     },
 
     // ---------- Drawing primitives ----------
@@ -234,10 +292,22 @@
           continue;
         }
 
+        // Sweep-pulse boost: 1.0 right after a hit, decays to 0 over PULSE_DURATION_MS.
+        let pulse = 0;
+        if (b.lastPingAt) {
+          const pingAge = nowMs - b.lastPingAt;
+          if (pingAge >= 0 && pingAge < PULSE_DURATION_MS) {
+            pulse = Math.pow(1 - pingAge / PULSE_DURATION_MS, 2);
+          }
+        }
+
         const sizeT = 0.4 + 0.6 * b.intensity;
-        const baseR = BLIP_MIN_RADIUS + (BLIP_MAX_RADIUS - BLIP_MIN_RADIUS) * sizeT;
-        const glowR = baseR * 3.2;
-        const brightness = (0.45 + 0.55 * b.intensity) * lifeAlpha;
+        const baseR =
+          (BLIP_MIN_RADIUS + (BLIP_MAX_RADIUS - BLIP_MIN_RADIUS) * sizeT) *
+          (1 + 0.55 * pulse);
+        const glowR = baseR * (3.2 + 1.6 * pulse);
+        const brightness =
+          Math.min(1, (0.45 + 0.55 * b.intensity) * lifeAlpha + 0.45 * pulse * lifeAlpha);
 
         // Outer soft glow.
         const glow = ctx.createRadialGradient(px, py, 0, px, py, glowR);
@@ -264,6 +334,44 @@
         alive.push(b);
       }
       this._blips = alive;
+
+      ctx.restore();
+    },
+
+    _drawRipples(ctx, cx, cy, radius, nowMs) {
+      if (this._ripples.length === 0) return;
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.clip();
+
+      const alive = [];
+      for (let i = 0; i < this._ripples.length; i++) {
+        const r = this._ripples[i];
+        const age = nowMs - r.bornAt;
+        if (age >= RIPPLE_DURATION_MS) continue;
+
+        const t = age / RIPPLE_DURATION_MS;
+        const eased = 1 - Math.pow(1 - t, 2); // ease-out radius growth
+        const px = cx + (r.x - 0.5) * 2 * radius;
+        const py = cy + (r.y - 0.5) * 2 * radius;
+
+        const startR = 4 + 4 * r.intensity;
+        const ringR = startR + RIPPLE_EXPAND_PX * (0.5 + 0.5 * r.intensity) * eased;
+        const alpha = (1 - t) * (0.35 + 0.45 * r.intensity);
+
+        ctx.strokeStyle = `rgba(57, 255, 156, ${alpha.toFixed(4)})`;
+        ctx.lineWidth = 1.5 * (1 - t) + 0.4;
+        ctx.shadowColor = COLOR_GLOW;
+        ctx.shadowBlur = 8 * (1 - t);
+        ctx.beginPath();
+        ctx.arc(px, py, ringR, 0, Math.PI * 2);
+        ctx.stroke();
+
+        alive.push(r);
+      }
+      this._ripples = alive;
 
       ctx.restore();
     },
