@@ -76,6 +76,12 @@ body {
     env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 
+@supports (height: 100dvh) {
+  #app {
+    height: 100dvh;
+  }
+}
+
 /* ---------- Top bar ---------- */
 #top-bar {
   display: flex;
@@ -191,6 +197,7 @@ body {
   justify-content: center;
   min-height: 0;
   padding: 8px;
+  touch-action: none;
 }
 
 #radar-canvas {
@@ -199,6 +206,8 @@ body {
   height: 100%;
   max-width: 100vmin;
   max-height: 100vmin;
+  touch-action: none;
+  contain: strict;
 }
 
 /* ---------- FPS overlay ---------- */
@@ -302,6 +311,7 @@ body {
   );
   box-shadow: 0 0 10px var(--accent-soft);
   transition: width 0.25s ease-out, background 0.4s, box-shadow 0.4s;
+  will-change: width;
 }
 
 .bar-ticks {

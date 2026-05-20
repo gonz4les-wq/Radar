@@ -60,6 +60,10 @@
     statusEl: null,
     statusTextEl: null,
 
+    _pendingActivity: null,
+    _pendingIntensity: null,
+    _rafScheduled: false,
+
     init() {
       this.activityEl = document.getElementById("hud-activity");
       this.intensityValueEl = document.getElementById("hud-intensity-value");
@@ -72,8 +76,8 @@
         ? this.statusEl.querySelector(".status-text")
         : null;
 
-      this.setActivity("none");
-      this.setIntensity(0);
+      this._applyActivity("none");
+      this._applyIntensity(0);
     },
 
     setStatus(state, text) {
@@ -89,13 +93,43 @@
     },
 
     setActivity(level) {
-      const norm = ACTIVITY_LEVELS.includes(level) ? level : "none";
-      this.body.setAttribute("data-activity", norm);
-      if (this.activityEl) this.activityEl.textContent = norm.toUpperCase();
+      const norm = ACTIVITY_LEVELS.indexOf(level) >= 0 ? level : "none";
+      this._pendingActivity = norm;
+      this._schedule();
     },
 
     setIntensity(value) {
-      const v = clamp01(value);
+      this._pendingIntensity = clamp01(value);
+      this._schedule();
+    },
+
+    _schedule() {
+      if (this._rafScheduled) return;
+      this._rafScheduled = true;
+      requestAnimationFrame(() => {
+        this._rafScheduled = false;
+        if (this._pendingActivity !== null) {
+          this._applyActivity(this._pendingActivity);
+          this._pendingActivity = null;
+        }
+        if (this._pendingIntensity !== null) {
+          this._applyIntensity(this._pendingIntensity);
+          this._pendingIntensity = null;
+        }
+      });
+    },
+
+    _applyActivity(norm) {
+      if (this.body.getAttribute("data-activity") !== norm) {
+        this.body.setAttribute("data-activity", norm);
+      }
+      if (this.activityEl) {
+        const up = norm.toUpperCase();
+        if (this.activityEl.textContent !== up) this.activityEl.textContent = up;
+      }
+    },
+
+    _applyIntensity(v) {
       if (this.intensityFillEl) {
         this.intensityFillEl.style.width = `${(v * 100).toFixed(1)}%`;
       }
