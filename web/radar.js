@@ -1,11 +1,15 @@
 /*
- * radar.js — static radar renderer with rotating sweep.
- * Step 1: concentric rings, crosshair, ticks, neon styling.
- * Step 2: clockwise sweep line with bright leading edge and fading trail.
+ * radar.js — radar renderer with sweep + live blips.
+ * Step 1: static rings, crosshair, ticks, neon framing.
+ * Step 2: clockwise sweep with bright leading edge and fading trail.
+ * Step 3: (no changes — data layer lives in app.js).
+ * Step 4: incoming blips are drawn as glowing dots that fade smoothly.
  */
 
 (function () {
   "use strict";
+
+  // ---------- Visual constants ----------
 
   const RING_COUNT = 6;
   const COLOR_NEON = "#39ff9c";
@@ -16,10 +20,19 @@
   const COLOR_BG_RADIAL_INNER = "rgba(57, 255, 156, 0.06)";
   const COLOR_BG_RADIAL_OUTER = "rgba(5, 7, 10, 0)";
 
-  // Sweep configuration
-  const SWEEP_PERIOD_MS = 7000; // full rotation
-  const SWEEP_TRAIL_RAD = (Math.PI * 2) * (110 / 360); // 110° trailing glow
-  const SWEEP_SEGMENTS = 28; // resolution of trailing gradient
+  // Sweep
+  const SWEEP_PERIOD_MS = 7000;
+  const SWEEP_TRAIL_RAD = (Math.PI * 2) * (110 / 360);
+  const SWEEP_SEGMENTS = 28;
+
+  // Blips
+  const BLIP_LIFETIME_MS = 3500;   // total visible duration
+  const BLIP_FADE_IN_MS = 220;     // quick ease-in to avoid pop-in
+  const BLIP_MIN_RADIUS = 3.0;     // px at intensity 0
+  const BLIP_MAX_RADIUS = 9.5;     // px at intensity 1
+  const BLIP_MAX_ACTIVE = 256;     // hard cap to keep mobile happy
+
+  // ---------- Radar singleton ----------
 
   const Radar = {
     canvas: null,
@@ -31,24 +44,28 @@
     cy: 0,
     radius: 0,
 
-    // animation
     _rafId: 0,
     _startTs: 0,
-    _angle: -Math.PI / 2, // start at 12 o'clock
+    _angle: -Math.PI / 2,
+    _blips: [], // { x, y, intensity, bornAt }
 
     init(canvas) {
       this.canvas = canvas;
       this.ctx = canvas.getContext("2d");
       this.resize();
+
       window.addEventListener("resize", () => this.resize());
       window.addEventListener("orientationchange", () => this.resize());
       document.addEventListener("visibilitychange", () => {
-        if (document.hidden) {
-          this._stop();
-        } else {
-          this._start();
-        }
+        if (document.hidden) this._stop();
+        else this._start();
       });
+
+      // Subscribe to the WebSocket data stream from app.js.
+      window.addEventListener("radar:data", (evt) => {
+        this.ingest(evt.detail && evt.detail.blips);
+      });
+
       this._start();
     },
 
@@ -66,6 +83,27 @@
       this.radius = Math.min(this.width, this.height) * 0.46;
     },
 
+    /**
+     * Accept a fresh list of blips from the backend. Each entry is
+     * stamped with bornAt so it can fade out independently.
+     */
+    ingest(blips) {
+      if (!Array.isArray(blips) || blips.length === 0) return;
+      const now = performance.now();
+      for (const b of blips) {
+        if (!b) continue;
+        const x = clamp01(b.x);
+        const y = clamp01(b.y);
+        const intensity = clamp01(b.intensity);
+        if (Number.isNaN(x) || Number.isNaN(y)) continue;
+        this._blips.push({ x, y, intensity, bornAt: now });
+      }
+      // Cap active blips, dropping the oldest first.
+      if (this._blips.length > BLIP_MAX_ACTIVE) {
+        this._blips.splice(0, this._blips.length - BLIP_MAX_ACTIVE);
+      }
+    },
+
     _start() {
       if (this._rafId) return;
       const loop = (ts) => {
@@ -73,7 +111,7 @@
         const elapsed = ts - this._startTs;
         const t = (elapsed % SWEEP_PERIOD_MS) / SWEEP_PERIOD_MS;
         this._angle = -Math.PI / 2 + t * Math.PI * 2;
-        this.render();
+        this.render(performance.now());
         this._rafId = requestAnimationFrame(loop);
       };
       this._rafId = requestAnimationFrame(loop);
@@ -87,7 +125,7 @@
       this._startTs = 0;
     },
 
-    render() {
+    render(nowMs) {
       const ctx = this.ctx;
       if (!ctx) return;
 
@@ -99,10 +137,13 @@
       this._drawRings(ctx, cx, cy, radius);
       this._drawCrosshair(ctx, cx, cy, radius);
       this._drawTicks(ctx, cx, cy, radius);
+      this._drawBlips(ctx, cx, cy, radius, nowMs);
       this._drawSweep(ctx, cx, cy, radius, this._angle);
       this._drawCenter(ctx, cx, cy);
       this._drawFrame(ctx, cx, cy, radius);
     },
+
+    // ---------- Drawing primitives ----------
 
     _drawBackdrop(ctx, cx, cy, radius) {
       const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius * 1.05);
@@ -160,22 +201,85 @@
       ctx.restore();
     },
 
-    _drawSweep(ctx, cx, cy, radius, angle) {
-      ctx.save();
+    _drawBlips(ctx, cx, cy, radius, nowMs) {
+      if (this._blips.length === 0) return;
 
-      // Clip to radar circle so the sweep never bleeds out.
+      ctx.save();
+      // Clip to the radar disc so blips never escape the frame.
       ctx.beginPath();
       ctx.arc(cx, cy, radius, 0, Math.PI * 2);
       ctx.clip();
 
-      // Fading trailing wedge — built from thin radial slices so opacity
-      // falls off exponentially behind the leading edge.
+      const alive = [];
+      for (let i = 0; i < this._blips.length; i++) {
+        const b = this._blips[i];
+        const age = nowMs - b.bornAt;
+        if (age >= BLIP_LIFETIME_MS) continue;
+
+        // Smooth fade-in then ease-out across lifetime.
+        const fadeIn = Math.min(1, age / BLIP_FADE_IN_MS);
+        const lifeT = age / BLIP_LIFETIME_MS;
+        const fadeOut = Math.pow(1 - lifeT, 1.6);
+        const lifeAlpha = fadeIn * fadeOut;
+
+        // Map normalized (0..1, 0..1) into the radar's bounding box.
+        const px = cx + (b.x - 0.5) * 2 * radius;
+        const py = cy + (b.y - 0.5) * 2 * radius;
+
+        // Skip blips outside the radar disc (with a small margin).
+        const dx = px - cx;
+        const dy = py - cy;
+        if (dx * dx + dy * dy > radius * radius * 1.02) {
+          alive.push(b);
+          continue;
+        }
+
+        const sizeT = 0.4 + 0.6 * b.intensity;
+        const baseR = BLIP_MIN_RADIUS + (BLIP_MAX_RADIUS - BLIP_MIN_RADIUS) * sizeT;
+        const glowR = baseR * 3.2;
+        const brightness = (0.45 + 0.55 * b.intensity) * lifeAlpha;
+
+        // Outer soft glow.
+        const glow = ctx.createRadialGradient(px, py, 0, px, py, glowR);
+        glow.addColorStop(0, `rgba(57, 255, 156, ${(0.55 * brightness).toFixed(4)})`);
+        glow.addColorStop(0.45, `rgba(57, 255, 156, ${(0.18 * brightness).toFixed(4)})`);
+        glow.addColorStop(1, "rgba(57, 255, 156, 0)");
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(px, py, glowR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Bright core.
+        ctx.fillStyle = `rgba(220, 255, 235, ${(0.85 * brightness).toFixed(4)})`;
+        ctx.beginPath();
+        ctx.arc(px, py, baseR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Hot center.
+        ctx.fillStyle = `rgba(255, 255, 255, ${(0.9 * brightness).toFixed(4)})`;
+        ctx.beginPath();
+        ctx.arc(px, py, Math.max(0.8, baseR * 0.35), 0, Math.PI * 2);
+        ctx.fill();
+
+        alive.push(b);
+      }
+      this._blips = alive;
+
+      ctx.restore();
+    },
+
+    _drawSweep(ctx, cx, cy, radius, angle) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.clip();
+
       const segments = SWEEP_SEGMENTS;
       const trail = SWEEP_TRAIL_RAD;
       const step = trail / segments;
 
       for (let i = 0; i < segments; i++) {
-        const t = i / segments; // 0 at leading edge, 1 at trail tail
+        const t = i / segments;
         const a1 = angle - i * step;
         const a0 = a1 - step;
         const alpha = Math.pow(1 - t, 2.2) * 0.32;
@@ -188,7 +292,6 @@
         ctx.fill();
       }
 
-      // Bright leading edge line.
       const ex = cx + Math.cos(angle) * radius;
       const ey = cy + Math.sin(angle) * radius;
 
@@ -206,7 +309,6 @@
       ctx.lineTo(ex, ey);
       ctx.stroke();
 
-      // Tiny bright tip dot at the perimeter for extra punch.
       ctx.shadowBlur = 14;
       ctx.fillStyle = COLOR_NEON;
       ctx.beginPath();
@@ -239,6 +341,13 @@
       ctx.restore();
     },
   };
+
+  function clamp01(n) {
+    const v = typeof n === "number" ? n : Number(n);
+    if (v < 0) return 0;
+    if (v > 1) return 1;
+    return v;
+  }
 
   window.Radar = Radar;
 })();
