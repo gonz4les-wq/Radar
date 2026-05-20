@@ -3,14 +3,14 @@
  *
  *  Step 1: static rings, crosshair, ticks, neon framing.
  *  Step 2: clockwise sweep with bright leading edge and fading trail.
- *  Step 3: (no changes — data layer lives in app.js).
  *  Step 4: incoming blips drawn as glowing dots that fade smoothly.
  *  Step 5: blips pulse + emit a ripple when the sweep passes over them.
  *  Step 7: static layers cached, blip sprite baked, conic-gradient
  *          sweep — designed for 60fps on mobile Safari.
- *  Step 9: 8 environmental zones rendered as a soft heatmap ring on
- *          the outer half of the radar disc. Smooth pulsing, neon
- *          green→cyan tint, radial bloom toward the rim.
+ *  Step 9: 8 environmental zones rendered as a soft heatmap ring.
+ *  Step 11: persistent activity heatmap — a ghost layer that
+ *           accumulates the live zone snapshot each frame and decays
+ *           exponentially toward black for a smooth temporal trail.
  */
 
 (function () {
@@ -45,10 +45,17 @@
   const RIPPLE_EXPAND_PX = 38;
   const RIPPLE_MAX_ACTIVE = 64;
 
-  // Zones (Step 9)
+  // Zones (live snapshot)
   const ZONE_COUNT = 8;
   const ZONE_SMOOTH_RATE = 6.5; // per-second exponential approach
   const ZONE_SKIP_EPSILON = 0.015;
+
+  // Temporal heatmap (persistent layer)
+  const PERSIST_HALF_LIFE_MS = 2400;
+  const PERSIST_LAMBDA = Math.LN2 / PERSIST_HALF_LIFE_MS;
+  const PERSIST_ACC_BOOST = 1.15;          // accumulation overshoot vs decay
+  const PERSIST_COMPOSITE_ALPHA = 0.6;     // brightness of the ghost layer
+  const PERSIST_IDLE_TIMEOUT_MS = 8000;    // skip composite once long-idle
 
   // Performance
   const SPRITE_SIZE = 128;
@@ -72,6 +79,7 @@
     _angle: -Math.PI / 2,
     _prevAngle: -Math.PI / 2,
     _lastFrameTs: 0,
+    _dtMs: 16,
 
     _blips: [],
     _ripples: [],
@@ -81,6 +89,9 @@
     _blipSprite: null,
     _zoneLayer: null,
     _zoneLayerCtx: null,
+    _persistLayer: null,
+    _persistLayerCtx: null,
+    _persistLastAccumMs: 0,
 
     _supportsConic: false,
     _resizePending: false,
@@ -160,7 +171,9 @@
       this.radius = Math.min(w, h) * 0.46;
 
       this._staticLayer = this._buildStaticLayer();
-      this._buildZoneLayer();
+      this._buildOffscreenLayer("_zoneLayer", "_zoneLayerCtx");
+      this._buildOffscreenLayer("_persistLayer", "_persistLayerCtx");
+      this._persistLastAccumMs = 0;
     },
 
     // ---------- Pre-rendered layers ----------
@@ -210,14 +223,24 @@
       return c;
     },
 
-    _buildZoneLayer() {
-      if (!this._zoneLayer) {
-        this._zoneLayer = document.createElement("canvas");
-        this._zoneLayerCtx = this._zoneLayer.getContext("2d");
+    _buildOffscreenLayer(canvasKey, ctxKey) {
+      if (!this[canvasKey]) {
+        this[canvasKey] = document.createElement("canvas");
+        this[ctxKey] = this[canvasKey].getContext("2d");
       }
-      this._zoneLayer.width = this.width * this.dpr;
-      this._zoneLayer.height = this.height * this.dpr;
-      this._zoneLayerCtx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      this[canvasKey].width = this.width * this.dpr;
+      this[canvasKey].height = this.height * this.dpr;
+      this[ctxKey].setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    },
+
+    _clearPersistLayer() {
+      if (!this._persistLayer || !this._persistLayerCtx) return;
+      const c = this._persistLayer;
+      const g = this._persistLayerCtx;
+      g.setTransform(1, 0, 0, 1, 0, 0);
+      g.clearRect(0, 0, c.width, c.height);
+      g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      this._persistLastAccumMs = 0;
     },
 
     // ---------- Data ingest ----------
@@ -256,6 +279,9 @@
 
     _start() {
       if (this._rafId) return;
+      // Fresh start (init or resume from hidden tab) — wipe persistence
+      // so we don't surface stale history from minutes ago.
+      this._clearPersistLayer();
       const loop = (ts) => {
         if (!this._startTs) {
           this._startTs = ts;
@@ -268,7 +294,8 @@
         this._angle = -Math.PI / 2 + t * TAU;
         const dtMs = ts - this._lastFrameTs;
         this._lastFrameTs = ts;
-        this._updateZones(dtMs);
+        this._dtMs = Math.min(100, Math.max(1, dtMs || 16));
+        this._updateZones(this._dtMs);
         this.render(ts);
         this._rafId = requestAnimationFrame(loop);
       };
@@ -313,22 +340,79 @@
       this._drawFrame(ctx, cx, cy, radius);
     },
 
-    // ---------- Zone heatmap ----------
+    // ---------- Zones: live snapshot + temporal persistence ----------
 
     _drawZones(ctx, cx, cy, radius, nowMs) {
-      if (!this._zoneLayer) return;
-
-      // Quick skip if nothing meaningful to draw.
-      let total = 0;
-      for (let i = 0; i < ZONE_COUNT; i++) total += this._zones[i].activity;
-      if (total < ZONE_SKIP_EPSILON) return;
+      if (!this._zoneLayer || !this._persistLayer) return;
 
       const lctx = this._zoneLayerCtx;
+      const pctx = this._persistLayerCtx;
       const w = this.width;
       const h = this.height;
+
+      // Sum activity to decide if we have anything to render this frame.
+      let total = 0;
+      for (let i = 0; i < ZONE_COUNT; i++) total += this._zones[i].activity;
+      const hasActivity = total >= ZONE_SKIP_EPSILON;
+
+      // ---- 1. Render the live snapshot into _zoneLayer.
       lctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
       lctx.clearRect(0, 0, w, h);
+      if (hasActivity) {
+        this._renderZoneSnapshot(lctx, cx, cy, radius, nowMs);
+      }
 
+      // ---- 2. Decay the persistence layer toward black.
+      const fadeAlpha = 1 - Math.exp(-PERSIST_LAMBDA * this._dtMs);
+      if (fadeAlpha > 0.0008) {
+        pctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+        pctx.globalCompositeOperation = "destination-out";
+        pctx.fillStyle = "rgba(0, 0, 0, " + fadeAlpha.toFixed(4) + ")";
+        pctx.fillRect(0, 0, w, h);
+        pctx.globalCompositeOperation = "source-over";
+      }
+
+      // ---- 3. Accumulate the live snapshot into the persistence layer.
+      if (hasActivity) {
+        const accAlpha = Math.min(1, fadeAlpha * PERSIST_ACC_BOOST);
+        if (accAlpha > 0.0005) {
+          pctx.globalAlpha = accAlpha;
+          pctx.drawImage(this._zoneLayer, 0, 0, w, h);
+          pctx.globalAlpha = 1;
+          this._persistLastAccumMs = nowMs;
+        }
+      }
+
+      // ---- 4. Composite both onto the main canvas (additive glow).
+      const persistAge = this._persistLastAccumMs
+        ? nowMs - this._persistLastAccumMs
+        : Infinity;
+      const persistVisible = persistAge < PERSIST_IDLE_TIMEOUT_MS;
+
+      if (!persistVisible && !hasActivity) return;
+
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      if (persistVisible) {
+        // Fade composite alpha as the layer ages out, so the ghost
+        // bows out smoothly instead of vanishing at the timeout.
+        const tail =
+          persistAge < PERSIST_IDLE_TIMEOUT_MS * 0.5
+            ? 1
+            : 1 -
+              (persistAge - PERSIST_IDLE_TIMEOUT_MS * 0.5) /
+                (PERSIST_IDLE_TIMEOUT_MS * 0.5);
+        ctx.globalAlpha = PERSIST_COMPOSITE_ALPHA * Math.max(0, tail);
+        ctx.drawImage(this._persistLayer, 0, 0, w, h);
+      }
+      if (hasActivity) {
+        ctx.globalAlpha = 1;
+        ctx.drawImage(this._zoneLayer, 0, 0, w, h);
+      }
+      ctx.restore();
+    },
+
+    _renderZoneSnapshot(lctx, cx, cy, radius, nowMs) {
       lctx.save();
       lctx.beginPath();
       lctx.arc(cx, cy, radius, 0, TAU);
@@ -337,8 +421,6 @@
       const breath = 0.88 + 0.12 * Math.sin(nowMs * 0.0017);
 
       if (this._supportsConic) {
-        // Conic gradient with one stop per sector centre + closing stop.
-        // Sector 0 is centred at "north"; index increases clockwise.
         const conic = lctx.createConicGradient(-Math.PI / 2, cx, cy);
         for (let i = 0; i <= ZONE_COUNT; i++) {
           const idx = i % ZONE_COUNT;
@@ -347,22 +429,25 @@
             0.85 + 0.15 * Math.sin(nowMs * 0.0028 + idx * 0.65);
           const a = clamp01(z.activity * breath * sectorPulse);
           const alpha = (0.04 + 0.55 * a).toFixed(4);
-          const mix = a;
-          const rr = 57 + Math.round((77 - 57) * mix);
-          const bb = 156 + Math.round((226 - 156) * mix);
+          const rr = 57 + Math.round((77 - 57) * a);
+          const bb = 156 + Math.round((226 - 156) * a);
           conic.addColorStop(
             i / ZONE_COUNT,
-            `rgba(${rr}, 255, ${bb}, ${alpha})`
+            "rgba(" + rr + ", 255, " + bb + ", " + alpha + ")"
           );
         }
         lctx.fillStyle = conic;
-        lctx.fillRect(cx - radius - 1, cy - radius - 1, radius * 2 + 2, radius * 2 + 2);
+        lctx.fillRect(
+          cx - radius - 1,
+          cy - radius - 1,
+          radius * 2 + 2,
+          radius * 2 + 2
+        );
       } else {
         this._drawZonesWedgeFallback(lctx, cx, cy, radius, nowMs, breath);
       }
 
-      // Radial mask — fades zones toward centre, brightest near the rim
-      // (gives the "radar-style bloom on the outer ring" look).
+      // Radial mask: fade toward centre, keep bright bloom on the rim.
       lctx.globalCompositeOperation = "destination-in";
       const mask = lctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
       mask.addColorStop(0.0, "rgba(0, 0, 0, 0)");
@@ -371,16 +456,14 @@
       mask.addColorStop(0.8, "rgba(0, 0, 0, 0.75)");
       mask.addColorStop(1.0, "rgba(0, 0, 0, 1)");
       lctx.fillStyle = mask;
-      lctx.fillRect(cx - radius - 1, cy - radius - 1, radius * 2 + 2, radius * 2 + 2);
+      lctx.fillRect(
+        cx - radius - 1,
+        cy - radius - 1,
+        radius * 2 + 2,
+        radius * 2 + 2
+      );
       lctx.globalCompositeOperation = "source-over";
       lctx.restore();
-
-      // Compose the heatmap onto the main canvas. Additive ("lighter")
-      // gives it a glowing, radar-style bloom over the static rings.
-      ctx.save();
-      ctx.globalCompositeOperation = "lighter";
-      ctx.drawImage(this._zoneLayer, 0, 0, w, h);
-      ctx.restore();
     },
 
     _drawZonesWedgeFallback(lctx, cx, cy, radius, nowMs, breath) {
@@ -400,12 +483,21 @@
         const bb = 156 + Math.round((226 - 156) * a);
 
         const grad = lctx.createRadialGradient(cx, cy, innerR, cx, cy, outerR);
-        grad.addColorStop(0, `rgba(${rr}, 255, ${bb}, 0)`);
-        grad.addColorStop(0.6, `rgba(${rr}, 255, ${bb}, ${(alpha * 0.4).toFixed(4)})`);
-        grad.addColorStop(1, `rgba(${rr}, 255, ${bb}, ${alpha.toFixed(4)})`);
+        grad.addColorStop(0, "rgba(" + rr + ", 255, " + bb + ", 0)");
+        grad.addColorStop(
+          0.6,
+          "rgba(" + rr + ", 255, " + bb + ", " + (alpha * 0.4).toFixed(4) + ")"
+        );
+        grad.addColorStop(
+          1,
+          "rgba(" + rr + ", 255, " + bb + ", " + alpha.toFixed(4) + ")"
+        );
         lctx.fillStyle = grad;
         lctx.beginPath();
-        lctx.moveTo(cx + Math.cos(angle0) * innerR, cy + Math.sin(angle0) * innerR);
+        lctx.moveTo(
+          cx + Math.cos(angle0) * innerR,
+          cy + Math.sin(angle0) * innerR
+        );
         lctx.arc(cx, cy, outerR, angle0, angle1, false);
         lctx.arc(cx, cy, innerR, angle1, angle0, true);
         lctx.closePath();
@@ -544,7 +636,7 @@
           startR + RIPPLE_EXPAND_PX * (0.5 + 0.5 * r.intensity) * eased;
         const alpha = oneMinusT * (0.35 + 0.45 * r.intensity);
 
-        ctx.strokeStyle = `rgba(57, 255, 156, ${alpha.toFixed(4)})`;
+        ctx.strokeStyle = "rgba(57, 255, 156, " + alpha.toFixed(4) + ")";
         ctx.lineWidth = 1.5 * oneMinusT + 0.4;
         ctx.beginPath();
         ctx.arc(px, py, ringR, 0, TAU);
@@ -595,7 +687,7 @@
           ctx.moveTo(cx, cy);
           ctx.arc(cx, cy, radius, a0, a1);
           ctx.closePath();
-          ctx.fillStyle = `rgba(57, 255, 156, ${alpha.toFixed(4)})`;
+          ctx.fillStyle = "rgba(57, 255, 156, " + alpha.toFixed(4) + ")";
           ctx.fill();
         }
       }
