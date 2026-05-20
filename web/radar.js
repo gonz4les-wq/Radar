@@ -1,19 +1,16 @@
 /*
- * radar.js — radar renderer with sweep, blips, sweep interaction.
+ * radar.js — radar renderer.
  *
- * Optimization notes for Step 7:
- *  - Backdrop, rings, crosshair and ticks are pre-rendered to an offscreen
- *    canvas once per resize and blitted each frame (no per-frame strokes).
- *  - Blips are drawn from a baked glow sprite via drawImage — no
- *    createRadialGradient per blip per frame.
- *  - The sweep trail uses a single createConicGradient fill where
- *    available (Safari 14+ / all modern browsers); a 14-segment
- *    fallback covers older runtimes.
- *  - Device pixel ratio is capped at 2 to avoid massive backing stores
- *    on retina phones.
- *  - Resize is observed via ResizeObserver and throttled to a single
- *    rAF callback to avoid thrash during iOS address-bar transitions.
- *  - rAF is paused on visibilitychange to save battery in background.
+ *  Step 1: static rings, crosshair, ticks, neon framing.
+ *  Step 2: clockwise sweep with bright leading edge and fading trail.
+ *  Step 3: (no changes — data layer lives in app.js).
+ *  Step 4: incoming blips drawn as glowing dots that fade smoothly.
+ *  Step 5: blips pulse + emit a ripple when the sweep passes over them.
+ *  Step 7: static layers cached, blip sprite baked, conic-gradient
+ *          sweep — designed for 60fps on mobile Safari.
+ *  Step 9: 8 environmental zones rendered as a soft heatmap ring on
+ *          the outer half of the radar disc. Smooth pulsing, neon
+ *          green→cyan tint, radial bloom toward the rim.
  */
 
 (function () {
@@ -48,6 +45,11 @@
   const RIPPLE_EXPAND_PX = 38;
   const RIPPLE_MAX_ACTIVE = 64;
 
+  // Zones (Step 9)
+  const ZONE_COUNT = 8;
+  const ZONE_SMOOTH_RATE = 6.5; // per-second exponential approach
+  const ZONE_SKIP_EPSILON = 0.015;
+
   // Performance
   const SPRITE_SIZE = 128;
   const DPR_CAP = 2;
@@ -69,11 +71,17 @@
     _startTs: 0,
     _angle: -Math.PI / 2,
     _prevAngle: -Math.PI / 2,
+    _lastFrameTs: 0,
+
     _blips: [],
     _ripples: [],
+    _zones: null,
 
     _staticLayer: null,
     _blipSprite: null,
+    _zoneLayer: null,
+    _zoneLayerCtx: null,
+
     _supportsConic: false,
     _resizePending: false,
     _ro: null,
@@ -84,6 +92,10 @@
       this._supportsConic =
         typeof this.ctx.createConicGradient === "function";
       this._blipSprite = this._buildBlipSprite();
+      this._zones = new Array(ZONE_COUNT);
+      for (let i = 0; i < ZONE_COUNT; i++) {
+        this._zones[i] = { activity: 0, target: 0 };
+      }
 
       this.resize(true);
 
@@ -104,9 +116,10 @@
         else this._start();
       });
 
-      // Backend payload from app.js
       window.addEventListener("radar:data", (evt) => {
-        this.ingest(evt.detail && evt.detail.blips);
+        const d = evt.detail || {};
+        this.ingest(d.blips);
+        this.ingestZones(d.zones);
       });
 
       this._start();
@@ -147,6 +160,7 @@
       this.radius = Math.min(w, h) * 0.46;
 
       this._staticLayer = this._buildStaticLayer();
+      this._buildZoneLayer();
     },
 
     // ---------- Pre-rendered layers ----------
@@ -176,7 +190,6 @@
       const cx = size / 2;
       const cy = size / 2;
 
-      // Outer halo
       const halo = g.createRadialGradient(cx, cy, 0, cx, cy, size / 2);
       halo.addColorStop(0.0, "rgba(57, 255, 156, 0.55)");
       halo.addColorStop(0.45, "rgba(57, 255, 156, 0.18)");
@@ -184,7 +197,6 @@
       g.fillStyle = halo;
       g.fillRect(0, 0, size, size);
 
-      // Bright core + hot center, blended via radial gradient.
       const coreR = size * 0.17;
       const core = g.createRadialGradient(cx, cy, 0, cx, cy, coreR);
       core.addColorStop(0.0, "rgba(255, 255, 255, 0.95)");
@@ -196,6 +208,16 @@
       g.fill();
 
       return c;
+    },
+
+    _buildZoneLayer() {
+      if (!this._zoneLayer) {
+        this._zoneLayer = document.createElement("canvas");
+        this._zoneLayerCtx = this._zoneLayer.getContext("2d");
+      }
+      this._zoneLayer.width = this.width * this.dpr;
+      this._zoneLayer.height = this.height * this.dpr;
+      this._zoneLayerCtx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     },
 
     // ---------- Data ingest ----------
@@ -217,6 +239,19 @@
       }
     },
 
+    ingestZones(zones) {
+      if (!Array.isArray(zones)) return;
+      for (let i = 0; i < zones.length; i++) {
+        const z = zones[i];
+        if (!z) continue;
+        const idx = z.sector;
+        if (typeof idx !== "number" || idx < 0 || idx >= ZONE_COUNT) continue;
+        const a = clamp01(z.activity);
+        if (Number.isNaN(a)) continue;
+        this._zones[idx | 0].target = a;
+      }
+    },
+
     // ---------- Animation loop ----------
 
     _start() {
@@ -225,11 +260,15 @@
         if (!this._startTs) {
           this._startTs = ts;
           this._prevAngle = this._angle;
+          this._lastFrameTs = ts;
         }
         const elapsed = ts - this._startTs;
         const t = (elapsed % SWEEP_PERIOD_MS) / SWEEP_PERIOD_MS;
         this._prevAngle = this._angle;
         this._angle = -Math.PI / 2 + t * TAU;
+        const dtMs = ts - this._lastFrameTs;
+        this._lastFrameTs = ts;
+        this._updateZones(dtMs);
         this.render(ts);
         this._rafId = requestAnimationFrame(loop);
       };
@@ -240,6 +279,16 @@
       if (this._rafId) cancelAnimationFrame(this._rafId);
       this._rafId = 0;
       this._startTs = 0;
+      this._lastFrameTs = 0;
+    },
+
+    _updateZones(dtMs) {
+      const dt = Math.min(0.1, Math.max(0, dtMs / 1000));
+      const k = 1 - Math.exp(-dt * ZONE_SMOOTH_RATE);
+      for (let i = 0; i < ZONE_COUNT; i++) {
+        const z = this._zones[i];
+        z.activity += (z.target - z.activity) * k;
+      }
     },
 
     render(nowMs) {
@@ -255,12 +304,113 @@
       ctx.clearRect(0, 0, w, h);
       ctx.drawImage(this._staticLayer, 0, 0, w, h);
 
+      this._drawZones(ctx, cx, cy, radius, nowMs);
       this._detectSweepHits(nowMs);
       this._drawBlips(ctx, cx, cy, radius, nowMs);
       this._drawRipples(ctx, cx, cy, radius, nowMs);
       this._drawSweep(ctx, cx, cy, radius, this._angle);
       this._drawCenter(ctx, cx, cy);
       this._drawFrame(ctx, cx, cy, radius);
+    },
+
+    // ---------- Zone heatmap ----------
+
+    _drawZones(ctx, cx, cy, radius, nowMs) {
+      if (!this._zoneLayer) return;
+
+      // Quick skip if nothing meaningful to draw.
+      let total = 0;
+      for (let i = 0; i < ZONE_COUNT; i++) total += this._zones[i].activity;
+      if (total < ZONE_SKIP_EPSILON) return;
+
+      const lctx = this._zoneLayerCtx;
+      const w = this.width;
+      const h = this.height;
+      lctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      lctx.clearRect(0, 0, w, h);
+
+      lctx.save();
+      lctx.beginPath();
+      lctx.arc(cx, cy, radius, 0, TAU);
+      lctx.clip();
+
+      const breath = 0.88 + 0.12 * Math.sin(nowMs * 0.0017);
+
+      if (this._supportsConic) {
+        // Conic gradient with one stop per sector centre + closing stop.
+        // Sector 0 is centred at "north"; index increases clockwise.
+        const conic = lctx.createConicGradient(-Math.PI / 2, cx, cy);
+        for (let i = 0; i <= ZONE_COUNT; i++) {
+          const idx = i % ZONE_COUNT;
+          const z = this._zones[idx];
+          const sectorPulse =
+            0.85 + 0.15 * Math.sin(nowMs * 0.0028 + idx * 0.65);
+          const a = clamp01(z.activity * breath * sectorPulse);
+          const alpha = (0.04 + 0.55 * a).toFixed(4);
+          const mix = a;
+          const rr = 57 + Math.round((77 - 57) * mix);
+          const bb = 156 + Math.round((226 - 156) * mix);
+          conic.addColorStop(
+            i / ZONE_COUNT,
+            `rgba(${rr}, 255, ${bb}, ${alpha})`
+          );
+        }
+        lctx.fillStyle = conic;
+        lctx.fillRect(cx - radius - 1, cy - radius - 1, radius * 2 + 2, radius * 2 + 2);
+      } else {
+        this._drawZonesWedgeFallback(lctx, cx, cy, radius, nowMs, breath);
+      }
+
+      // Radial mask — fades zones toward centre, brightest near the rim
+      // (gives the "radar-style bloom on the outer ring" look).
+      lctx.globalCompositeOperation = "destination-in";
+      const mask = lctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+      mask.addColorStop(0.0, "rgba(0, 0, 0, 0)");
+      mask.addColorStop(0.3, "rgba(0, 0, 0, 0)");
+      mask.addColorStop(0.55, "rgba(0, 0, 0, 0.22)");
+      mask.addColorStop(0.8, "rgba(0, 0, 0, 0.75)");
+      mask.addColorStop(1.0, "rgba(0, 0, 0, 1)");
+      lctx.fillStyle = mask;
+      lctx.fillRect(cx - radius - 1, cy - radius - 1, radius * 2 + 2, radius * 2 + 2);
+      lctx.globalCompositeOperation = "source-over";
+      lctx.restore();
+
+      // Compose the heatmap onto the main canvas. Additive ("lighter")
+      // gives it a glowing, radar-style bloom over the static rings.
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      ctx.drawImage(this._zoneLayer, 0, 0, w, h);
+      ctx.restore();
+    },
+
+    _drawZonesWedgeFallback(lctx, cx, cy, radius, nowMs, breath) {
+      const SECTOR_RAD = TAU / ZONE_COUNT;
+      const innerR = radius * 0.3;
+      const outerR = radius * 1.0;
+      for (let i = 0; i < ZONE_COUNT; i++) {
+        const z = this._zones[i];
+        const sectorPulse = 0.85 + 0.15 * Math.sin(nowMs * 0.0028 + i * 0.65);
+        const a = clamp01(z.activity * breath * sectorPulse);
+        if (a < 0.02) continue;
+
+        const angle0 = -Math.PI / 2 - SECTOR_RAD / 2 + i * SECTOR_RAD;
+        const angle1 = angle0 + SECTOR_RAD;
+        const alpha = 0.04 + 0.55 * a;
+        const rr = 57 + Math.round((77 - 57) * a);
+        const bb = 156 + Math.round((226 - 156) * a);
+
+        const grad = lctx.createRadialGradient(cx, cy, innerR, cx, cy, outerR);
+        grad.addColorStop(0, `rgba(${rr}, 255, ${bb}, 0)`);
+        grad.addColorStop(0.6, `rgba(${rr}, 255, ${bb}, ${(alpha * 0.4).toFixed(4)})`);
+        grad.addColorStop(1, `rgba(${rr}, 255, ${bb}, ${alpha.toFixed(4)})`);
+        lctx.fillStyle = grad;
+        lctx.beginPath();
+        lctx.moveTo(cx + Math.cos(angle0) * innerR, cy + Math.sin(angle0) * innerR);
+        lctx.arc(cx, cy, outerR, angle0, angle1, false);
+        lctx.arc(cx, cy, innerR, angle1, angle0, true);
+        lctx.closePath();
+        lctx.fill();
+      }
     },
 
     // ---------- Sweep interaction ----------
@@ -450,7 +600,6 @@
         }
       }
 
-      // Bright leading edge
       const ex = cx + Math.cos(angle) * radius;
       const ey = cy + Math.sin(angle) * radius;
       const lineGrad = ctx.createLinearGradient(cx, cy, ex, ey);

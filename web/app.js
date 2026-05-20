@@ -43,6 +43,7 @@
     lastError: null,
     data: {
       blips: [],
+      zones: [],
       global_intensity: 0.0,
       activity_level: "none",
     },
@@ -268,6 +269,7 @@
 
       const next = RadarState.data;
       if (Array.isArray(payload.blips)) next.blips = payload.blips;
+      if (Array.isArray(payload.zones)) next.zones = payload.zones;
       if (typeof payload.global_intensity === "number") {
         next.global_intensity = payload.global_intensity;
         HUD.setIntensity(payload.global_intensity);
