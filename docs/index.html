@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+  />
+
+  <title>WiFi Activity Radar</title>
+  <meta name="description" content="Anonymous environmental activity radar." />
+
+  <!-- Web App Manifest (Chrome / Edge / modern browsers) -->
+  <link rel="manifest" href="manifest.json" />
+
+  <!-- Theme & color hints -->
+  <meta name="theme-color" content="#05070a" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#05070a" />
+  <meta name="color-scheme" content="dark" />
+
+  <!-- iOS PWA: standalone, status bar, app title -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Radar" />
+  <meta name="format-detection" content="telephone=no" />
+
+  <!-- Icons -->
+  <link rel="icon" type="image/svg+xml" href="icon.svg" />
+  <link rel="apple-touch-icon" href="icon.svg" />
+  <link rel="mask-icon" href="icon.svg" color="#39ff9c" />
+
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body data-activity="none">
+  <div id="app">
+    <header id="top-bar">
+      <h1 id="title">WiFi Activity Radar</h1>
+      <div id="top-right">
+        <button id="fps-toggle" type="button" aria-pressed="false" title="Toggle FPS">FPS</button>
+        <div id="status-tag" class="status-disconnected">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span class="status-text">CONNECTING</span>
+        </div>
+      </div>
+    </header>
+
+    <main id="radar-stage">
+      <canvas id="radar-canvas"></canvas>
+      <div id="fps-readout" hidden>FPS <span id="fps-value">--</span></div>
+    </main>
+
+    <footer id="hud">
+      <div class="hud-cell hud-activity">
+        <span class="hud-label">Activity Level</span>
+        <span class="hud-value" id="hud-activity">NONE</span>
+      </div>
+
+      <div class="hud-cell hud-intensity">
+        <div class="hud-intensity-head">
+          <span class="hud-label">Global Intensity</span>
+          <span class="hud-value-small" id="hud-intensity-value">0.00</span>
+        </div>
+        <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0">
+          <div class="bar-fill" id="hud-intensity-fill"></div>
+          <div class="bar-ticks" aria-hidden="true"></div>
+        </div>
+      </div>
+    </footer>
+  </div>
+
+  <script src="radar.js"></script>
+  <script src="app.js"></script>
+
+  <!-- Service worker registration: offline shell cache for PWA mode. -->
+  <script>
+    (function () {
+      if (!("serviceWorker" in navigator)) return;
+      // Service workers require a secure context (https or localhost).
+      var secure =
+        window.isSecureContext ||
+        location.hostname === "localhost" ||
+        location.hostname === "127.0.0.1";
+      if (!secure) return;
+      window.addEventListener("load", function () {
+        navigator.serviceWorker
+          .register("service-worker.js")
+          .catch(function () {
+            /* registration failed — radar still runs without offline support */
+          });
+      });
+    })();
+  </script>
+</body>
+</html>
