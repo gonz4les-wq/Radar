@@ -323,6 +323,43 @@
     return v;
   }
 
+  // ---------- Simulator wiring ----------
+
+  function startLocalSimulator() {
+    if (!window.RadarSimulator) {
+      HUD.setStatus("disconnected", "OFFLINE");
+      return;
+    }
+    HUD.setStatus("live", "LIVE");
+    RadarState.connected = true;
+
+    // Tap into simulator events to drive the HUD.
+    window.addEventListener("radar:data", (evt) => {
+      const payload = evt.detail;
+      if (!payload || typeof payload !== "object") return;
+      if (typeof payload.global_intensity === "number") {
+        HUD.setIntensity(payload.global_intensity);
+      }
+      if (typeof payload.activity_level === "string") {
+        HUD.setActivity(payload.activity_level.toLowerCase());
+      }
+    });
+
+    window.RadarSimulator.start();
+  }
+
+  function hasExplicitWsUrl() {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("ws")) return true;
+    } catch (_) {
+      /* ignore */
+    }
+    return (
+      typeof window.RADAR_WS_URL === "string" && window.RADAR_WS_URL.length > 0
+    );
+  }
+
   // ---------- Boot ----------
 
   function boot() {
@@ -334,7 +371,14 @@
       window.Radar.init(canvas);
     }
 
-    WS.connect();
+    // If a WebSocket URL was explicitly provided (?ws=... or window.RADAR_WS_URL),
+    // use it. Otherwise, run the simulation locally in the browser — no backend
+    // required.
+    if (hasExplicitWsUrl()) {
+      WS.connect();
+    } else {
+      startLocalSimulator();
+    }
   }
 
   if (document.readyState === "loading") {
