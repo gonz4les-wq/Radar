@@ -6,10 +6,30 @@
     name="viewport"
     content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
   />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="theme-color" content="#05070a" />
+
   <title>WiFi Activity Radar</title>
+  <meta name="description" content="Anonymous environmental activity radar." />
+
+  <!-- Web App Manifest (Chrome / Edge / modern browsers) -->
+  <link rel="manifest" href="manifest.json" />
+
+  <!-- Theme & color hints -->
+  <meta name="theme-color" content="#05070a" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#05070a" />
+  <meta name="color-scheme" content="dark" />
+
+  <!-- iOS PWA: standalone, status bar, app title -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Radar" />
+  <meta name="format-detection" content="telephone=no" />
+
+  <!-- Icons -->
+  <link rel="icon" type="image/svg+xml" href="icon.svg" />
+  <link rel="apple-touch-icon" href="icon.svg" />
+  <link rel="mask-icon" href="icon.svg" color="#39ff9c" />
+
   <link rel="stylesheet" href="style.css" />
 </head>
 <body data-activity="none">
@@ -51,5 +71,25 @@
 
   <script src="radar.js"></script>
   <script src="app.js"></script>
+
+  <!-- Service worker registration: offline shell cache for PWA mode. -->
+  <script>
+    (function () {
+      if (!("serviceWorker" in navigator)) return;
+      // Service workers require a secure context (https or localhost).
+      var secure =
+        window.isSecureContext ||
+        location.hostname === "localhost" ||
+        location.hostname === "127.0.0.1";
+      if (!secure) return;
+      window.addEventListener("load", function () {
+        navigator.serviceWorker
+          .register("service-worker.js")
+          .catch(function () {
+            /* registration failed — radar still runs without offline support */
+          });
+      });
+    })();
+  </script>
 </body>
 </html>

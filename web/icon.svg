@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="50%" r="70%">
+      <stop offset="0%" stop-color="#0d1822"/>
+      <stop offset="100%" stop-color="#05070a"/>
+    </radialGradient>
+    <radialGradient id="rim" cx="50%" cy="50%" r="50%">
+      <stop offset="55%" stop-color="rgba(57,255,156,0)"/>
+      <stop offset="92%" stop-color="rgba(57,255,156,0.28)"/>
+      <stop offset="100%" stop-color="rgba(57,255,156,0)"/>
+    </radialGradient>
+    <radialGradient id="blip" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="35%" stop-color="#39ff9c"/>
+      <stop offset="100%" stop-color="rgba(57,255,156,0)"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <circle cx="256" cy="256" r="200" fill="url(#rim)"/>
+
+  <g stroke="#39ff9c" fill="none">
+    <circle cx="256" cy="256" r="200" stroke-width="3" opacity="0.85"/>
+    <circle cx="256" cy="256" r="160" stroke-width="2" opacity="0.4"/>
+    <circle cx="256" cy="256" r="120" stroke-width="2" opacity="0.3"/>
+    <circle cx="256" cy="256" r="80"  stroke-width="2" opacity="0.25"/>
+    <circle cx="256" cy="256" r="40"  stroke-width="2" opacity="0.2"/>
+  </g>
+
+  <g stroke="#4de2ff" stroke-width="2" opacity="0.3" stroke-dasharray="8,10">
+    <line x1="56"  y1="256" x2="456" y2="256"/>
+    <line x1="256" y1="56"  x2="256" y2="456"/>
+  </g>
+
+  <path d="M 256 256 L 256 56 A 200 200 0 0 1 396 116 Z" fill="#39ff9c" opacity="0.22"/>
+
+  <line x1="256" y1="256" x2="256" y2="56" stroke="#39ff9c" stroke-width="5" stroke-linecap="round"/>
+
+  <circle cx="256" cy="56"  r="9" fill="#39ff9c"/>
+  <circle cx="256" cy="256" r="7" fill="#39ff9c"/>
+
+  <circle cx="340" cy="186" r="14" fill="url(#blip)"/>
+  <circle cx="186" cy="332" r="10" fill="url(#blip)" opacity="0.85"/>
+  <circle cx="332" cy="340" r="8"  fill="url(#blip)" opacity="0.6"/>
+</svg>
