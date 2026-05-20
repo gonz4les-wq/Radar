@@ -1,0 +1,17 @@
+{
+  "name": "wifi-radar-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mock telemetry backend for the WiFi Activity Radar — anonymous environmental activity simulation.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
