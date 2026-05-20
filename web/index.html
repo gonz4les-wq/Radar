@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+  />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#05070a" />
+  <title>WiFi Activity Radar</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <header id="top-bar">
+      <h1 id="title">WiFi Activity Radar</h1>
+      <div id="status-tag">STANDBY</div>
+    </header>
+
+    <main id="radar-stage">
+      <canvas id="radar-canvas"></canvas>
+    </main>
+
+    <footer id="hud">
+      <div class="hud-cell">
+        <span class="hud-label">DEVICES</span>
+        <span class="hud-value" id="hud-devices">--</span>
+      </div>
+      <div class="hud-cell">
+        <span class="hud-label">CHANNEL</span>
+        <span class="hud-value" id="hud-channel">--</span>
+      </div>
+      <div class="hud-cell">
+        <span class="hud-label">SIGNAL</span>
+        <span class="hud-value" id="hud-signal">--</span>
+      </div>
+      <div class="hud-cell">
+        <span class="hud-label">UPTIME</span>
+        <span class="hud-value" id="hud-uptime">--</span>
+      </div>
+    </footer>
+  </div>
+
+  <script src="radar.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
